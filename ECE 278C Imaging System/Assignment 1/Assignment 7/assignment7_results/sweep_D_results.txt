@@ -1,0 +1,6 @@
+# Sweep over D (in units of ж╦0_base), f0=3GHz, r0=2.5m, theta0=20бу
+D_factor	D(m)	err(m)
+1.0	0.1000	4.4988
+2.0	0.2000	4.5299
+3.0	0.3000	4.5299
+4.0	0.4000	4.5289

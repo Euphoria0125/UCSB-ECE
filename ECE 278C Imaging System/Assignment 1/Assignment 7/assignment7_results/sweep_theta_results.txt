@@ -1,0 +1,6 @@
+# Sweep over theta0, f0=3GHz, D=2¦Ë0_base, r0=2.5m
+theta0(deg)	err(m)
+10	5.8015
+20	5.4556
+30	4.9572
+40	4.9926
