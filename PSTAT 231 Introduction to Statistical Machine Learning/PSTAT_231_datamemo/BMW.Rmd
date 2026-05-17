@@ -1,0 +1,85 @@
+---
+title: "Data Memo: BMW Used Car Price Prediction"
+author: "Xinyi Yang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## 1. Dataset Overview
+
+The dataset used in this project is the BMW Used Car dataset obtained from Kaggle:
+
+https://www.kaggle.com/datasets/mdmahfuzsumon/bmw-car-with-advanced-features
+
+This dataset contains information on used BMW cars, including various features that may influence the price of the vehicle. The dataset includes variables such as model, year, mileage, transmission type, fuel type, engine size, and price.
+
+The dataset contains approximately several thousand observations and around 8–10 variables. These variables include both numerical variables (e.g., price, mileage, engine size) and categorical variables (e.g., model, transmission, fuel type).
+
+Some missing values may be present in the dataset. If missing data is identified, I plan to handle it using appropriate methods such as removing incomplete observations or imputing missing values depending on the extent of missingness.
+
+---
+
+## 2. Research Question
+
+The primary objective of this project is to investigate the factors that influence the price of used BMW cars and to build a model that can accurately predict car prices.
+
+The main research question is:
+
+"What factors influence the price of used BMW cars, and can we predict car prices based on these features?"
+
+The response (outcome) variable in this project is:
+
+- price: the listed price of the used BMW car.
+
+Since the response variable is continuous, this problem will be approached as a regression problem.
+
+Potential predictors that may be useful include:
+- mileage
+- year
+- transmission
+- fuel type
+- engine size
+- model
+
+These variables are expected to have meaningful relationships with the price.
+
+The goal of this model is both predictive and inferential:
+- Predictive: to accurately estimate car prices
+- Inferential: to understand how different features affect price
+
+---
+
+## 3. Proposed Timeline
+
+Week 1:
+- Load and clean the dataset
+- Handle missing values
+- Convert categorical variables if necessary
+
+Week 2:
+- Perform exploratory data analysis (EDA)
+- Visualize relationships between variables
+- Identify outliers
+
+Week 3:
+- Build regression models (e.g., linear regression)
+- Evaluate model performance
+
+Week 4:
+- Improve the model (feature selection, transformations)
+- Finalize analysis and write report
+
+---
+
+## 4. Questions / Concerns
+
+Some potential challenges in this project include:
+
+- Handling missing data appropriately
+- Encoding categorical variables (e.g., transmission, fuel type)
+- Dealing with outliers in price or mileage
+- Selecting the most appropriate model
+
+I would like guidance on:
+- Best practices for feature selection
+- Whether more advanced models are recommended for this dataset

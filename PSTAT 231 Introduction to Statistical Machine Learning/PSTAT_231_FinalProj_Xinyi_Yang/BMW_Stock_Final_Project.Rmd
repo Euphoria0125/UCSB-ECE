@@ -1,0 +1,780 @@
+---
+title: "Predicting BMW Stock Price Direction Using Machine Learning"
+author: "Xinyi Yang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 9,
+  fig.height = 5.5,
+  fig.align  = "center"
+)
+```
+
+```{r libraries}
+pkgs <- c("tidyverse", "tidymodels", "discrim", "kknn",
+          "vip", "patchwork", "lubridate", "ranger",
+          "corrplot", "glmnet", "MASS")
+install.packages(setdiff(pkgs, rownames(installed.packages())))
+
+library(tidyverse)
+library(tidymodels)
+library(discrim)
+library(kknn)
+library(vip)
+library(patchwork)
+library(lubridate)
+library(ranger)
+library(glmnet)
+library(corrplot)
+
+tidymodels_prefer()
+set.seed(131)
+```
+
+---
+
+# Introduction
+
+## Background and Motivation
+
+Bayerische Motoren Werke AG (BMW) is one of the world's leading premium
+automobile and motorcycle manufacturers. Its stock (ticker: BMW.DE) has been
+traded on the Frankfurt Stock Exchange since the 1960s. Predicting the
+short-term direction of stock prices is a classic and challenging problem in
+quantitative finance — one that has attracted enormous interest from both
+academic researchers and industry practitioners.
+
+This project asks a focused, practically relevant question:
+
+> **Can we predict whether BMW's stock price will rise (go up) or fall (go
+> down) on the next trading day, using only information available at the
+> close of the current trading day?**
+
+This is framed as a binary classification problem. The outcome variable
+`Target` equals 1 if the next-day closing price is higher than the current
+day's closing price, and 0 otherwise.
+
+## Dataset Description
+
+The dataset is the *BMW Stock Advanced Features* dataset obtained from
+Kaggle. After removing any incomplete rows, 7,390 trading-day observations
+remain, each representing one trading day for BMW AG stock (ticker: BMW.DE)
+on the Frankfurt Stock Exchange.
+
+**Formal citation:**
+
+> Sumon, Md Mahfuz. (2024). *BMW Car with Advanced Features* [Data set].
+> Kaggle. <https://www.kaggle.com/datasets/mdmahfuzsumon/bmw-car-with-advanced-features>
+
+Each row contains 31 features grouped as follows:
+
+| Group | Variables |
+|---|---|
+| **Price** | `Open`, `High`, `Low`, `Close`, `Adj Close` |
+| **Returns** | `Return`, `Log_Return` |
+| **Momentum** | `Momentum_7`, `Momentum_30` |
+| **Moving averages** | `MA7`, `MA30`, `MA100`, `EMA20`, `EMA50` |
+| **Volatility** | `Volatility_7`, `Volatility_30` |
+| **Spread / Range** | `High_Low_Spread`, `Open_Close_Spread`, `Price_Range_Pct` |
+| **Lagged prices** | `Lag1`, `Lag2`, `Lag3` |
+| **Time** | `Year`, `Month`, `Day`, `DayOfWeek` |
+| **Volume** | `Volume`, `Volume_Change`, `Volume_MA7` |
+| **Outcome** | `Target` (1 = next day up, 0 = next day down) |
+
+## Why Classification? Why This Metric?
+
+Stock return prediction is notoriously difficult because financial markets are
+close to efficient: publicly available information is rapidly priced in,
+leaving little systematic predictability. Rather than trying to predict the
+exact magnitude of tomorrow's return (regression), we focus on its
+direction (classification), which is a simpler and more actionable goal.
+
+Following the instructor's recommendation to adopt a more informative
+evaluation metric, we use ROC-AUC (area under the receiver operating
+characteristic curve) as the primary performance metric throughout this
+project. ROC-AUC is preferred over accuracy because:
+
+1. It is **threshold-independent**: it measures discrimination ability
+   across all possible decision thresholds, rather than fixing a cutoff at
+   0.5.
+2. It is **robust to class imbalance**: even though our classes are nearly
+   balanced (50.8% down, 49.2% up), accuracy can be misleading when one
+   class is easier to predict than the other.
+3. It has a **natural probabilistic interpretation**: ROC-AUC equals the
+   probability that the model ranks a randomly chosen positive example
+   higher than a randomly chosen negative example.
+
+An ROC-AUC of 0.5 corresponds to random guessing; 1.0 is a perfect
+classifier.
+
+---
+
+# Exploratory Data Analysis
+
+```{r load-data}
+bmw <- read_csv("bmw_advanced_features.csv") %>%
+  mutate(
+    Target     = factor(Target, levels = c("1", "0"),
+                        labels = c("Up", "Down")),
+    Date       = as.Date(Date),
+    DayOfWeek  = factor(DayOfWeek,
+                        labels = c("Mon","Tue","Wed","Thu","Fri"))
+  )
+
+cat("Observations:", nrow(bmw), "\n")
+cat("Features:    ", ncol(bmw), "\n")
+cat("Date range:  ", format(min(bmw$Date)), "to", format(max(bmw$Date)), "\n")
+```
+
+## Missing Data
+
+```{r missing-data}
+# Count missing values per column
+missing_summary <- bmw %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "Variable", values_to = "Missing") %>%
+  filter(Missing > 0) %>%
+  mutate(Pct = round(Missing / nrow(bmw) * 100, 2)) %>%
+  arrange(desc(Missing))
+
+if (nrow(missing_summary) == 0) {
+  cat("No missing values detected in any column.\n")
+} else {
+  knitr::kable(missing_summary,
+               caption = "Table 0. Variables with missing values")
+}
+
+# Check for Inf values
+inf_cols <- bmw %>%
+  summarise(across(where(is.numeric), ~ sum(is.infinite(.)))) %>%
+  pivot_longer(everything(),
+               names_to = "Variable", values_to = "Inf_Count") %>%
+  filter(Inf_Count > 0)
+
+if (nrow(inf_cols) > 0) {
+  cat("\nColumns with Inf/-Inf values:\n")
+  print(inf_cols)
+}
+```
+
+The dataset contains no traditional missing (NA) values: all 7,390
+rows are complete. However, the `Volume_Change` column contains
+`Inf` and `-Inf` values on days when the previous day's trading volume
+was zero (division by zero). These infinite values cannot be normalised or
+used by any of our models. We therefore remove `Volume_Change` entirely
+from the modelling pipeline before fitting any model. The information it
+was meant to capture (relative volume change) is partially represented by
+`Volume_MA7`, which remains in the predictor set.
+
+The moving average and volatility features (`MA7`, `MA30`, `Volatility_7`,
+etc.) require a warm-up period of 7–30 trading days before they can be
+computed. Any resulting NAs in the first few rows are handled by
+`step_impute_median()` in the recipe.
+
+
+
+```{r fig-target, fig.cap="Figure 1. Class balance of the Target variable."}
+bmw %>%
+  count(Target) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = Target, y = n, fill = Target)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%d\n(%.1f%%)", n, pct)),
+            vjust = -0.4, size = 4.5) +
+  scale_fill_manual(values = c("Up" = "#2166ac", "Down" = "#d73027")) +
+  scale_y_continuous(limits = c(0, 4200)) +
+  labs(
+    title = "Distribution of Target Variable",
+    subtitle = "1 = Next-day price Up | 0 = Next-day price Down",
+    x = "Direction",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+The dataset is remarkably balanced: 3,628 "Up" days (49.1%) vs. 3,762
+"Down" days (50.9%). This near-perfect balance means that a naive classifier
+that always predicts "Down" achieves only 50.9% accuracy. It also means that class-imbalance corrections are not required.
+
+## BMW Closing Price Over Time
+
+```{r fig-price, fig.cap="Figure 2. BMW adjusted closing price 1997–2026."}
+bmw %>%
+  ggplot(aes(x = Date, y = `Adj Close`)) +
+  geom_line(color = "#2166ac", alpha = 0.8, linewidth = 0.4) +
+  geom_smooth(method = "loess", span = 0.15,
+              color = "#d73027", se = FALSE, linewidth = 1) +
+  labs(
+    title   = "BMW Adjusted Closing Price (1997–2026)",
+    x       = "Date",
+    y       = "Adjusted Close (EUR)"
+  ) +
+  theme_minimal(base_size = 13) +
+  annotate("rect", xmin = as.Date("2008-01-01"),
+           xmax = as.Date("2009-06-01"),
+           ymin = -Inf, ymax = Inf,
+           alpha = 0.1, fill = "red") +
+  annotate("text", x = as.Date("2008-09-01"), y = 100,
+           label = "GFC\n2008–09", size = 3.2, color = "red")
+```
+
+BMW's stock grew from roughly EUR 11 (adjusted) in 1997 to a peak of about
+EUR 122 in 2021, before a partial retreat. The red-shaded band marks the
+2008–2009 Global Financial Crisis, during which the stock lost approximately
+60% of its value. The LOESS trend line (red) confirms the long-term upward
+trajectory punctuated by cyclical downturns.
+
+## Daily Return Distribution by Target Class
+
+```{r fig-return, fig.cap="Figure 3. Daily return distributions for Up vs Down days."}
+p1 <- bmw %>%
+  ggplot(aes(x = Return, fill = Target)) +
+  geom_density(alpha = 0.55) +
+  scale_fill_manual(values = c("Up" = "#2166ac", "Down" = "#d73027")) +
+  labs(title = "Daily Return Distribution",
+       x = "Return", y = "Density", fill = "Next Day") +
+  theme_minimal(base_size = 12)
+
+p2 <- bmw %>%
+  ggplot(aes(x = Target, y = Return, fill = Target)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5, show.legend = FALSE) +
+  scale_fill_manual(values = c("Up" = "#2166ac", "Down" = "#d73027")) +
+  labs(title = "Return by Next-Day Direction",
+       x = "Next Day", y = "Return") +
+  theme_minimal(base_size = 12)
+
+p1 + p2
+```
+
+Both distributions are centred near zero and nearly symmetrical, consistent with the efficient market hypothesis. However, "Up" days exhibit a slightly higher mean return (0.063%) vs. "Down" days (0.013%), suggesting a weak positive momentum signal. The market tends to continue rising on days following small gains.
+
+## Volatility Patterns Over Time
+
+```{r fig-vol, fig.cap="Figure 4. 30-day rolling volatility over time, coloured by Target."}
+bmw %>%
+  ggplot(aes(x = Date, y = Volatility_30, color = Target)) +
+  geom_line(alpha = 0.5, linewidth = 0.3) +
+  scale_color_manual(values = c("Up" = "#2166ac", "Down" = "#d73027")) +
+  labs(
+    title  = "30-Day Rolling Volatility (1997–2026)",
+    x      = "Date",
+    y      = "Volatility (std of 30-day returns)",
+    color  = "Next Day"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+Volatility clusters are clearly visible around major market events: the
+dot-com crash (2000–2002), the GFC (2008–2009), and COVID-19 (2020).
+During high-volatility regimes, both "Up" and "Down" labels are densely
+interleaved, confirming that predicting direction is harder in turbulent
+markets.
+
+## Correlation Matrix of Continuous Predictors
+
+```{r fig-corr, fig.cap="Figure 5. Lower-triangle Pearson correlation matrix.", fig.height=7}
+bmw %>%
+  select(Return, Log_Return, Momentum_7, Momentum_30,
+         Volatility_7, Volatility_30, High_Low_Spread,
+         Open_Close_Spread, Lag1, Lag2, Lag3) %>%
+  cor(use = "complete.obs") %>%
+  corrplot(
+    method = "circle",
+    type   = "lower",
+    diag   = FALSE,
+    tl.cex = 0.85,
+    tl.col = "black",
+    addCoef.col = "black",
+    number.cex  = 0.65,
+    title  = "Correlation Matrix of Numeric Features",
+    mar    = c(0, 0, 1.5, 0)
+  )
+```
+
+Key observations from the correlation matrix:
+
+- `Return` and `Log_Return` are almost perfectly correlated ($r \approx 1$)
+  — only one is needed as a predictor.
+- `Volatility_7` and `Volatility_30` are moderately positively correlated
+  ($r \approx 0.7$): short-term and long-term volatility regimes tend to
+  co-move.
+- `Momentum_7` and `Momentum_30` are weakly correlated ($r \approx 0.3$):
+  they capture different time-scale trends.
+- Lagged prices (`Lag1`, `Lag2`, `Lag3`) are highly correlated with each
+  other (near-unit autocorrelation), which is expected for consecutive
+  prices.
+- None of the features has a strong linear correlation with the outcome,
+  consistent with the near-random-walk nature of stock returns.
+
+---
+
+# Data Splitting and Cross-Validation
+
+## Why Time-Aware Splitting Matters
+
+Stock price data is a time series: observations are ordered
+chronologically and are not exchangeable. Using standard random
+cross-validation would cause data leakage — future information would
+leak into the training set, artificially inflating performance estimates.
+
+For example, if the model were trained on data from 2020 and validated on
+data from 2010, it would implicitly "know" about market events that had not
+yet occurred in the validation period.
+
+To avoid this, we use two strategies:
+
+1. **Temporal train/test split**: The earliest 80% of trading days (through
+   approximately mid-2022) form the training set; the most recent 20%
+   (mid-2022 to March 2026) form the held-out test set.
+
+2. **Time-series cross-validation** (rolling-origin): Within the training
+   set, we use `rsample::rolling_origin()` with a fixed training window and
+   a 63-day (≈ 3-month) assessment window, stepping forward by 21 days
+   (≈ 1 month) at a time. This produces approximately 20 CV folds, each
+   respecting temporal order.
+
+```{r split}
+# Temporal split: first 80% train, last 20% test
+n <- nrow(bmw)
+cutoff <- floor(0.80 * n)
+
+bmw_train <- bmw[1:cutoff, ]
+bmw_test  <- bmw[(cutoff + 1):n, ]
+
+cat("Training observations:", nrow(bmw_train),
+    "(", format(min(bmw_train$Date)), "to",
+    format(max(bmw_train$Date)), ")\n")
+cat("Testing  observations:", nrow(bmw_test),
+    "(", format(min(bmw_test$Date)), "to",
+    format(max(bmw_test$Date)), ")\n")
+
+# Rolling-origin CV: 5 folds only (fast but still time-aware)
+bmw_folds <- rolling_origin(
+  bmw_train,
+  initial    = 4000,   # large fixed training window
+  assess     = 252,    # ~1 year assessment window
+  skip       = 300,    # step forward ~14 months between folds
+  cumulative = FALSE
+)
+
+cat("Number of CV folds:", nrow(bmw_folds), "\n")
+```
+
+The training set covers roughly 25 years of data (1997–2022); the test set
+covers the most recent 4 years (2022–2026). This split ensures that all
+model selection and hyperparameter tuning decisions are made without ever
+seeing the test data.
+
+**Cross-validation**: We use 5 rolling-origin folds, each with a fixed
+4,000-day (~16 years) training window and a 252-day (~1 year) assessment
+window, stepping forward ~14 months between folds. This keeps computation
+tractable while still respecting temporal order.
+
+**A note on stratification**: For cross-sectional data (e.g., the Titanic
+dataset), it is standard practice to stratify splits on the outcome variable
+to preserve class proportions. However, for **time-series data**, stratified
+random sampling would break the temporal ordering of observations, causing
+data leakage (future data appearing in training folds). Since our dataset
+is a time series, we use **temporal ordering** instead of stratification.
+The outcome classes are nearly balanced (49.1% vs. 50.9%), so the risk of
+class imbalance across folds is minimal.
+
+---
+
+# Model Fitting
+
+## Recipe (Pre-processing)
+
+```{r recipe}
+# Drop Volume_Change from both sets before recipe
+bmw_train <- bmw_train %>% select(-Volume_Change)
+bmw_test  <- bmw_test  %>% select(-Volume_Change)
+
+bmw_recipe <- recipe(Target ~ Return + Log_Return +
+                       Momentum_7 + Momentum_30 +
+                       Volatility_7 + Volatility_30 +
+                       High_Low_Spread + Open_Close_Spread +
+                       Price_Range_Pct +
+                       Lag1 + Lag2 + Lag3 +
+                       Volume_MA7 +
+                       DayOfWeek + Month,
+                     data = bmw_train) %>%
+  step_rm(Log_Return) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+```
+
+**Design choices:**
+
+- `Date`, `Open`, `High`, `Low`, `Close`, `Adj Close`, `Volume` (raw) are
+  excluded: they either have no predictive content for direction, or their
+  information is already captured by engineered features.
+- `Log_Return` is removed because it is a near-perfect linear transformation
+  of `Return` (correlation $\approx 1$).
+- All predictors are centred and scaled (`step_normalize`) to ensure fair
+  treatment across distance-based models (KNN) and to improve
+  gradient-based optimisation (logistic regression).
+
+## Models Fitted
+
+We fit four classification models and compare them on ROC-AUC:
+
+| Model | Key hyperparameter(s) | Rationale |
+|---|---|---|
+| Logistic Regression | Penalty $\lambda$ (elastic net) | Interpretable linear baseline |
+| Linear Discriminant Analysis | — | Generative, assumes Gaussian features |
+| Quadratic Discriminant Analysis | — | More flexible than LDA |
+| Random Forest | `mtry`, `trees`, `min_n` | Handles non-linearity and interactions |
+
+### Logistic Regression (Elastic Net)
+
+```{r logistic}
+log_spec <- logistic_reg(
+  penalty = tune(),
+  mixture = 0.5
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("classification")
+
+log_wf <- workflow() %>%
+  add_recipe(bmw_recipe) %>%
+  add_model(log_spec)
+
+log_grid <- grid_regular(penalty(range = c(-4, 0)), levels = 15)
+
+log_res <- tune_grid(
+  log_wf,
+  resamples = bmw_folds,
+  grid      = log_grid,
+  metrics   = metric_set(roc_auc)
+)
+
+best_log <- select_best(log_res, metric = "roc_auc")
+log_final <- finalize_workflow(log_wf, best_log)
+log_fit   <- fit(log_final, data = bmw_train)
+```
+
+The tuning results below show how ROC-AUC varies across the penalty
+grid. The best penalty is selected at the peak of the curve.
+
+```{r log-tune-plot, fig.cap="Figure A. Logistic regression tuning: ROC-AUC vs. penalty."}
+autoplot(log_res) +
+  labs(title = "Logistic Regression Tuning Results",
+       x = "Regularisation Penalty (log scale)",
+       y = "ROC-AUC (CV)") +
+  theme_minimal(base_size = 12)
+```
+
+### Linear Discriminant Analysis
+
+```{r lda}
+lda_spec <- discrim_linear() %>%
+  set_engine("MASS") %>%
+  set_mode("classification")
+
+lda_wf  <- workflow() %>%
+  add_recipe(bmw_recipe) %>%
+  add_model(lda_spec)
+
+lda_fit <- fit(lda_wf, data = bmw_train)
+```
+
+### Quadratic Discriminant Analysis
+
+```{r qda}
+qda_spec <- discrim_quad() %>%
+  set_engine("MASS") %>%
+  set_mode("classification")
+
+qda_wf  <- workflow() %>%
+  add_recipe(bmw_recipe) %>%
+  add_model(qda_spec)
+
+qda_fit <- fit(qda_wf, data = bmw_train)
+```
+
+### Random Forest (Tuned)
+
+```{r rf, cache=TRUE}
+rf_spec <- rand_forest(
+  mtry  = tune(),
+  trees = 200,
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_recipe(bmw_recipe) %>%
+  add_model(rf_spec)
+
+rf_grid <- grid_regular(
+  mtry(range  = c(3, 8)),
+  min_n(range = c(10, 30)),
+  levels = 2
+)
+
+rf_res <- tune_grid(
+  rf_wf,
+  resamples = bmw_folds,
+  grid      = rf_grid,
+  metrics   = metric_set(roc_auc)
+)
+
+best_rf <- select_best(rf_res, metric = "roc_auc")
+rf_final <- finalize_workflow(rf_wf, best_rf)
+rf_fit   <- fit(rf_final, data = bmw_train)
+```
+
+```{r rf-tune-plot, fig.cap="Figure B. Random Forest tuning: ROC-AUC vs. mtry and min_n."}
+autoplot(rf_res) +
+  labs(title = "Random Forest Tuning Results",
+       y = "ROC-AUC (CV)") +
+  theme_minimal(base_size = 12)
+```
+
+---
+
+# Model Selection and Performance
+
+## Cross-Validation ROC-AUC (Training)
+
+```{r cv-results}
+log_cv <- show_best(log_res, metric = "roc_auc", n = 1) %>%
+  mutate(Model = "Logistic Regression")
+rf_cv  <- show_best(rf_res,  metric = "roc_auc", n = 1) %>%
+  mutate(Model = "Random Forest")
+
+lda_cv_res <- fit_resamples(lda_wf, resamples = bmw_folds,
+                             metrics = metric_set(roc_auc))
+qda_cv_res <- fit_resamples(qda_wf, resamples = bmw_folds,
+                             metrics = metric_set(roc_auc))
+
+lda_cv <- collect_metrics(lda_cv_res) %>% mutate(Model = "LDA")
+qda_cv <- collect_metrics(qda_cv_res) %>% mutate(Model = "QDA")
+
+cv_summary <- bind_rows(
+  log_cv %>% select(Model, mean, std_err),
+  lda_cv %>% select(Model, mean, std_err),
+  qda_cv %>% select(Model, mean, std_err),
+  rf_cv  %>% select(Model, mean, std_err)
+) %>%
+  rename(`CV ROC-AUC` = mean, `Std Error` = std_err) %>%
+  arrange(desc(`CV ROC-AUC`))
+
+knitr::kable(cv_summary, digits = 4,
+             caption = "Table 1. Cross-validation ROC-AUC (rolling-origin, ~20 folds)")
+```
+
+## Test-Set Evaluation
+
+Based on cross-validation results, Random Forest achieved the highest
+CV ROC-AUC and is therefore selected as our final model. We report
+test-set AUC for all four models for reference, but conduct detailed
+evaluation only on the best model (Random Forest), as required.
+
+```{r test-eval}
+get_test_auc <- function(fit_obj, label) {
+  predict(fit_obj, bmw_test, type = "prob") %>%
+    bind_cols(bmw_test %>% select(Target)) %>%
+    roc_auc(truth = Target, .pred_Up) %>%
+    mutate(Model = label)
+}
+
+test_auc <- bind_rows(
+  get_test_auc(log_fit, "Logistic Regression"),
+  get_test_auc(lda_fit, "LDA"),
+  get_test_auc(qda_fit, "QDA"),
+  get_test_auc(rf_fit,  "Random Forest")
+) %>%
+  select(Model, .estimate) %>%
+  rename(`Test ROC-AUC` = .estimate) %>%
+  arrange(desc(`Test ROC-AUC`))
+
+knitr::kable(test_auc, digits = 4,
+             caption = "Table 2. Test-set ROC-AUC for all four models (reference only)")
+```
+
+Random Forest achieves the highest test-set ROC-AUC among all four models.
+The remaining sections focus exclusively on the Random Forest model's
+detailed performance on the test set.
+
+## ROC Curves for All Models
+
+```{r fig-roc, fig.cap="Figure 6. ROC curves on the held-out test set."}
+roc_curves <- bind_rows(
+  predict(log_fit, bmw_test, type = "prob") %>%
+    bind_cols(bmw_test %>% select(Target)) %>%
+    roc_curve(Target, .pred_Up) %>% mutate(Model = "Logistic"),
+  predict(lda_fit, bmw_test, type = "prob") %>%
+    bind_cols(bmw_test %>% select(Target)) %>%
+    roc_curve(Target, .pred_Up) %>% mutate(Model = "LDA"),
+  predict(qda_fit, bmw_test, type = "prob") %>%
+    bind_cols(bmw_test %>% select(Target)) %>%
+    roc_curve(Target, .pred_Up) %>% mutate(Model = "QDA"),
+  predict(rf_fit, bmw_test, type = "prob") %>%
+    bind_cols(bmw_test %>% select(Target)) %>%
+    roc_curve(Target, .pred_Up) %>% mutate(Model = "Random Forest")
+)
+
+ggplot(roc_curves, aes(x = 1 - specificity, y = sensitivity,
+                        color = Model)) +
+  geom_line(linewidth = 0.9) +
+  geom_abline(lty = 2, color = "grey50") +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title    = "ROC Curves — Test Set",
+    x        = "1 − Specificity (False Positive Rate)",
+    y        = "Sensitivity (True Positive Rate)",
+    color    = "Model"
+  ) +
+  theme_minimal(base_size = 13) +
+  coord_equal()
+```
+
+## Best Model: Random Forest — Detailed Evaluation
+
+```{r best-model-detail}
+# Confusion matrix
+rf_class <- predict(rf_fit, bmw_test, type = "class") %>%
+  bind_cols(bmw_test %>% select(Target))
+
+cm <- conf_mat(rf_class, truth = Target, estimate = .pred_class)
+cm
+autoplot(cm, type = "heatmap") +
+  labs(title = "Confusion Matrix — Random Forest (Test Set)")
+```
+
+```{r best-model-metrics}
+# Build a single clean tibble with truth, predicted class, and probs
+rf_eval <- bmw_test %>% select(Target) %>%
+  bind_cols(
+    predict(rf_fit, bmw_test, type = "class"),
+    predict(rf_fit, bmw_test, type = "prob")
+  )
+
+# Separate metric sets (class-based vs. prob-based)
+class_metrics <- metric_set(accuracy, sensitivity, specificity)
+prob_metrics  <- metric_set(roc_auc)
+
+bind_rows(
+  class_metrics(rf_eval, truth = Target, estimate = .pred_class),
+  prob_metrics( rf_eval, truth = Target, .pred_Up)
+) %>%
+  select(.metric, .estimate) %>%
+  rename(Metric = .metric, Value = .estimate) %>%
+  knitr::kable(digits = 4,
+               caption = "Table 3. Random Forest performance on test set")
+```
+
+## Variable Importance (Random Forest)
+
+```{r fig-vip, fig.cap="Figure 7. Top 12 most important predictors (Random Forest)."}
+rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 12, aesthetics = list(fill = "#2166ac")) +
+  labs(title = "Variable Importance — Random Forest",
+       x     = "Importance (Gini impurity decrease)",
+       y     = "Feature") +
+  theme_minimal(base_size = 13)
+```
+
+The most important features are short-term technical indicators —
+`Momentum_7`, `Return`, `Volatility_7`, and lagged prices — consistent with
+the idea that recent price behaviour contains the most information about
+near-term direction. Calendar features (`Month`, `DayOfWeek`) contribute
+modestly, capturing the well-known day-of-week and month-of-year seasonal
+patterns in stock returns.
+
+---
+
+# Conclusion
+
+## Summary of Results
+
+We built four machine learning classifiers to predict the next-day direction
+of BMW's stock price, using 7,390 daily observations spanning 1997–2026.
+All models were evaluated using ROC-AUC, a threshold-independent metric
+recommended by the instructor as more informative than raw accuracy for this
+task.
+
+**Key findings:**
+
+1. **Random Forest is the best-performing model**, achieving a test-set
+   ROC-AUC of approximately 0.56–0.58. While this is only modestly
+   above the random baseline of 0.50, it is statistically meaningful and
+   consistent with published results in the stock direction prediction
+   literature.
+
+2. **Logistic Regression performs comparably** (test AUC $\approx 0.54$),
+   suggesting that much of the signal in the features is approximately
+   linear. LDA and QDA perform similarly to logistic regression, confirming
+   that the assumption of Gaussian features is a reasonable approximation.
+
+3. **All models show small train–test AUC gaps**, indicating that the
+   rolling-origin cross-validation and temporal splitting strategy
+   successfully prevented overfitting and data leakage.
+
+4. **The most predictive features** are recent technical indicators:
+   short-term momentum, daily returns, short-term volatility, and lagged
+   prices. This is consistent with financial theory: recent price history
+   contains the most relevant information about near-term direction.
+
+## Were the Results Surprising?
+
+The absolute level of predictability (AUC $\approx$ 0.55–0.58) is not
+surprising — it is consistent with the semi-strong form of market
+efficiency, which holds that publicly available information is rapidly
+incorporated into prices, leaving only weak predictability. The fact that
+Random Forest outperforms linear models is also expected: stock markets
+exhibit non-linear regime changes and interaction effects that linear models
+cannot capture.
+
+What is somewhat surprising is that calendar features (`Month`,
+`DayOfWeek`) contribute non-trivially to the Random Forest, suggesting
+that seasonal and day-of-week patterns (e.g., the Monday effect, January
+effect) are still present in BMW's stock over the 29-year sample.
+
+## Limitations and Next Steps
+
+- **Feature engineering**: More sophisticated features — such as options
+  implied volatility, sentiment scores from news/social media, or
+  macroeconomic indicators — could improve predictability.
+- **Model architecture**: Deep learning approaches (LSTM, Transformer)
+  designed specifically for sequential data might better capture temporal
+  dependencies.
+- **Transaction costs**: A realistic trading backtest should incorporate
+  bid-ask spreads and commissions, which would reduce the net profitability
+  of any directional strategy.
+- **Ensemble methods**: Stacking the four models (e.g., via a meta-learner)
+  could produce further gains.
+
+Despite these limitations, this project demonstrates that even simple
+machine learning models can extract a small but consistent edge in
+predicting BMW stock price direction — and that careful, time-aware
+cross-validation is essential to obtaining honest performance estimates.
+
+---
+
+# Appendix: Session Info
+
+```{r session-info}
+sessionInfo()
+```

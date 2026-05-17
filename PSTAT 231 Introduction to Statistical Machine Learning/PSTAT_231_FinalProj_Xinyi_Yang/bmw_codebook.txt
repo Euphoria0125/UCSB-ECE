@@ -1,0 +1,195 @@
+BMW Stock Advanced Features Dataset — Codebook
+================================================
+Source: Kaggle — BMW Car with Advanced Features
+URL: https://www.kaggle.com/datasets/mdmahfuzsumon/bmw-car-with-advanced-features
+Observations: 7,390 trading days
+Period: 1997-03-27 to 2026-03-30
+
+Each row represents one trading day for BMW AG stock (ticker: BMW.DE,
+Frankfurt Stock Exchange).
+
+-----------------------------------------------------------------------
+COLUMN DEFINITIONS
+-----------------------------------------------------------------------
+
+Date
+  Type: Date (YYYY-MM-DD)
+  Description: Calendar date of the trading day.
+
+Open
+  Type: Numeric (EUR)
+  Description: Opening price of BMW stock at market open.
+
+High
+  Type: Numeric (EUR)
+  Description: Highest intraday price reached during the trading day.
+
+Low
+  Type: Numeric (EUR)
+  Description: Lowest intraday price reached during the trading day.
+
+Close
+  Type: Numeric (EUR)
+  Description: Closing price of BMW stock at market close.
+
+Adj Close
+  Type: Numeric (EUR)
+  Description: Adjusted closing price, accounting for stock splits,
+               dividends, and other corporate actions. This is the
+               price used for return calculations.
+
+Volume
+  Type: Numeric (shares)
+  Description: Total number of BMW shares traded during the day.
+               Note: Some early records show Volume = 0 (non-trading days
+               included in the original source).
+
+Return
+  Type: Numeric (proportion)
+  Description: Simple daily return = (Close_t - Close_{t-1}) / Close_{t-1}.
+               Represents the percentage change in price from the
+               previous trading day.
+
+Log_Return
+  Type: Numeric
+  Description: Logarithmic daily return = ln(Close_t / Close_{t-1}).
+               For small returns, Log_Return ≈ Return.
+               Preferred in finance because log returns are time-additive.
+
+Momentum_7
+  Type: Numeric (EUR)
+  Description: 7-day price momentum = Close_t - Close_{t-7}.
+               Positive values indicate upward short-term momentum.
+
+Momentum_30
+  Type: Numeric (EUR)
+  Description: 30-day price momentum = Close_t - Close_{t-30}.
+               Positive values indicate upward medium-term momentum.
+
+MA7
+  Type: Numeric (EUR)
+  Description: 7-day simple moving average of closing prices.
+               Smooths out short-term price fluctuations.
+
+MA30
+  Type: Numeric (EUR)
+  Description: 30-day simple moving average of closing prices.
+
+MA100
+  Type: Numeric (EUR)
+  Description: 100-day simple moving average of closing prices.
+               Commonly used as a long-term trend indicator.
+
+EMA20
+  Type: Numeric (EUR)
+  Description: 20-day exponential moving average of closing prices.
+               Gives more weight to recent prices than a simple MA.
+
+EMA50
+  Type: Numeric (EUR)
+  Description: 50-day exponential moving average of closing prices.
+
+Volatility_7
+  Type: Numeric
+  Description: Rolling 7-day standard deviation of daily returns.
+               Measures short-term price variability / risk.
+
+Volatility_30
+  Type: Numeric
+  Description: Rolling 30-day standard deviation of daily returns.
+               Measures medium-term price variability / risk.
+
+High_Low_Spread
+  Type: Numeric (EUR)
+  Description: Intraday price range = High - Low.
+               A measure of intraday volatility.
+
+Open_Close_Spread
+  Type: Numeric (EUR)
+  Description: Intraday directional move = Close - Open.
+               Positive: price moved up during the day.
+               Negative: price moved down during the day.
+
+Price_Range_Pct
+  Type: Numeric (proportion)
+  Description: Proportional intraday range = (High - Low) / Open.
+               Normalises the intraday range by the opening price.
+
+Lag1
+  Type: Numeric (EUR)
+  Description: Previous day's closing price (Close_{t-1}).
+               Used to capture first-order autocorrelation in prices.
+
+Lag2
+  Type: Numeric (EUR)
+  Description: Closing price two days ago (Close_{t-2}).
+
+Lag3
+  Type: Numeric (EUR)
+  Description: Closing price three days ago (Close_{t-3}).
+
+Year
+  Type: Integer
+  Description: Calendar year extracted from Date. Range: 1997–2026.
+
+Month
+  Type: Integer (1–12)
+  Description: Calendar month extracted from Date.
+               1 = January, 2 = February, ..., 12 = December.
+
+Day
+  Type: Integer (1–31)
+  Description: Day of the calendar month extracted from Date.
+
+DayOfWeek
+  Type: Integer (0–4)
+  Description: Day of the trading week.
+               0 = Monday, 1 = Tuesday, 2 = Wednesday,
+               3 = Thursday, 4 = Friday.
+               (No weekends appear because markets are closed.)
+
+Volume_Change
+  Type: Numeric (proportion)
+  Description: Relative change in trading volume from previous day
+               = (Volume_t - Volume_{t-1}) / Volume_{t-1}.
+               Measures acceleration or deceleration in trading activity.
+
+Volume_MA7
+  Type: Numeric (shares)
+  Description: 7-day simple moving average of trading volume.
+               Used to identify unusual volume spikes relative to
+               recent norms.
+
+Target  [OUTCOME VARIABLE]
+  Type: Binary integer
+  Values:
+    1 = Next-day closing price is HIGHER than current closing price
+        (price goes Up on the following trading day)
+    0 = Next-day closing price is LOWER than or equal to current
+        closing price (price goes Down or stays flat)
+  Description: The binary classification target. Constructed as:
+               Target_t = 1 if Close_{t+1} > Close_t, else 0.
+               The last row of the dataset has Target = NaN/missing
+               because no next-day observation exists.
+  Class balance: 3,628 Up (49.1%) vs 3,762 Down (50.9%) — nearly balanced.
+
+-----------------------------------------------------------------------
+NOTES
+-----------------------------------------------------------------------
+1. All price columns (Open, High, Low, Close, Adj Close, Lag1-3,
+   MA*, EMA*, Momentum*) are denominated in EUR (euros).
+
+2. The dataset includes only trading days (Monday–Friday, excluding
+   German public holidays). Some early records (1997) show Volume = 0,
+   which may indicate data collection artefacts.
+
+3. Moving averages and volatility measures require a warm-up period:
+   e.g., MA100 is NaN for the first 99 trading days. Any such missing
+   values should be dropped or imputed before modelling.
+
+4. The Target variable is constructed from next-day prices. The final
+   observation in the dataset does not have a valid Target.
+
+5. To prevent data leakage in time-series modelling, always split the
+   data temporally (earlier dates = training, later dates = testing),
+   never randomly.
